@@ -769,6 +769,89 @@ describe('workers/branch', () => {
       expect(sanitize.sanitize).toHaveBeenCalledWith(errorMessage);
     });
 
+    it('executes post-upgrade task that unmodifies branch', async () => {
+      const updatedPackageFile: File = {
+        name: 'pom.xml',
+        contents: 'pom.xml file contents',
+      };
+      getUpdated.getUpdatedPackageFiles.mockResolvedValueOnce({
+        updatedPackageFiles: [updatedPackageFile],
+        artifactErrors: [],
+      } as never);
+      npmPostExtract.getAdditionalFiles.mockResolvedValueOnce({
+        artifactErrors: [],
+        updatedArtifacts: [
+          {
+            name: 'yarn.lock',
+            contents: Buffer.from([1, 2, 3]) /* Binary content */,
+          },
+        ],
+      } as never);
+      git.branchExists.mockReturnValueOnce(true);
+      platform.getBranchPr.mockResolvedValueOnce({
+        title: 'rebase!',
+        state: PrState.Open,
+        body: `- [x] <!-- rebase-check -->`,
+      } as never);
+      git.isBranchModified.mockResolvedValueOnce(true);
+      git.getRepoStatus.mockResolvedValueOnce({
+        modified: ['modified_file'],
+        not_added: [],
+        deleted: ['deleted_file'],
+      } as StatusResult);
+
+      fs.outputFile.mockReturnValue();
+      fs.readFile.mockResolvedValueOnce(Buffer.from(''));
+
+      schedule.isScheduledNow.mockReturnValueOnce(false);
+      commit.commitFilesToBranch.mockResolvedValueOnce(null);
+
+      const adminConfig = {
+        allowedPostUpgradeCommands: ['^echo {{{versioning}}}$'],
+        allowPostUpgradeCommandTemplating: true,
+        trustLevel: 'high',
+      };
+      setAdminConfig(adminConfig);
+
+      const result = await branchWorker.processBranch({
+        ...config,
+        updatedArtifacts: [
+          { name: 'modified_file', contents: '' },
+          { name: 'modified_then_deleted_file', contents: '' },
+          { name: '|delete|', contents: 'deleted_file' },
+          { name: '|delete|', contents: 'deleted_then_undeleted_file' },
+        ],
+        postUpgradeTasks: {
+          commands: ['echo {{{versioning}}}', 'disallowed task'],
+          fileFilters: ['modified_file', 'deleted_file'],
+        },
+        localDir: '/localDir',
+        upgrades: [
+          {
+            ...defaultConfig,
+            depName: 'some-dep-name',
+            postUpgradeTasks: {
+              commands: ['echo {{{versioning}}}', 'disallowed task'],
+              fileFilters: [
+                'modified_file',
+                'modified_then_deleted_file',
+                'deleted_file',
+                'deleted_then_undeleted_file',
+              ],
+            },
+          } as never,
+        ],
+      });
+
+      expect(result).toEqual(ProcessBranchResult.Done);
+      expect(
+        commit.commitFilesToBranch.mock.calls[0][0].updatedArtifacts
+      ).toEqual([
+        { name: 'modified_file', contents: Buffer.from('') },
+        { name: '|delete|', contents: 'deleted_file' },
+      ]);
+    });
+
     it('handles post-upgrade task exec errors', async () => {
       const updatedPackageFile: File = {
         name: 'pom.xml',
